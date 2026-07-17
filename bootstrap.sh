@@ -180,6 +180,13 @@ EOF
 }
 
 main() {
+  case "${1:-}" in
+    -h|--help|help)
+      run_target help
+      return 0
+      ;;
+  esac
+
   info "1key 远程一键安装"
   info "仓库: ${REPO_URL} @ ${REPO_BRANCH}"
   info "目录: ${INSTALL_DIR}"
