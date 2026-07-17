@@ -9,6 +9,8 @@
 # 直接装某个组件（跳过主菜单）:
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) 233boy
+#   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
+#   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) swap
 #
 # ========== 私有仓库 ==========
 #   export GITHUB_TOKEN=ghp_xxxx   # 需有 repo 权限
@@ -135,7 +137,8 @@ fetch_repo() {
 
   chmod +x "${INSTALL_DIR}/install.sh" \
     "${INSTALL_DIR}/bootstrap.sh" \
-    "${INSTALL_DIR}/scripts/singbox/"*.sh 2>/dev/null || true
+    "${INSTALL_DIR}/scripts/singbox/"*.sh \
+    "${INSTALL_DIR}/scripts/system/"*.sh 2>/dev/null || true
 }
 
 # ---------- 启动 ----------
@@ -156,14 +159,35 @@ run_target() {
       info "直接运行: sing-box 233boy"
       exec bash "${INSTALL_DIR}/scripts/singbox/233boy.sh"
       ;;
+    bbr)
+      info "直接运行: BBR"
+      exec bash "${INSTALL_DIR}/scripts/system/bbr.sh" "${@:2}"
+      ;;
+    swap)
+      info "直接运行: Swap"
+      exec bash "${INSTALL_DIR}/scripts/system/swap.sh" "${@:2}"
+      ;;
+    timezone|tz|ntp)
+      info "直接运行: 时区/NTP"
+      exec bash "${INSTALL_DIR}/scripts/system/timezone.sh" "${@:2}"
+      ;;
+    net|netopt|net-optimize)
+      info "直接运行: 网络 sysctl 优化"
+      exec bash "${INSTALL_DIR}/scripts/system/net-optimize.sh" "${@:2}"
+      ;;
+    dns)
+      info "直接运行: DNS"
+      exec bash "${INSTALL_DIR}/scripts/system/dns.sh" "${@:2}"
+      ;;
     -h|--help|help)
       cat <<EOF
 用法:
-  bootstrap.sh [menu|yoyo|233boy]
+  bootstrap.sh [menu|yoyo|233boy|bbr|swap|timezone|net|dns]
 
 任意机器一键（公开仓库）:
   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
+  bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
 
 私有仓库:
   export GITHUB_TOKEN=ghp_xxx
@@ -173,7 +197,7 @@ EOF
       exit 0
       ;;
     *)
-      err "未知目标: ${target}（支持: menu | yoyo | 233boy）"
+      err "未知目标: ${target}（支持: menu | yoyo | 233boy | bbr | swap | timezone | net | dns）"
       exit 1
       ;;
   esac
@@ -193,7 +217,12 @@ main() {
 
   ensure_tools
   fetch_repo
-  run_target "${1:-menu}"
+  # 透传全部参数：bootstrap.sh bbr enable / swap create 2G 等
+  if [[ $# -eq 0 ]]; then
+    run_target menu
+  else
+    run_target "$@"
+  fi
 }
 
 main "$@"

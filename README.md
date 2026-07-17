@@ -20,6 +20,8 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstr
 # 直接装某个组件（跳过主菜单）
 bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
 bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) 233boy
+bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
+bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) swap
 ```
 
 无 `bash <(...)` 时可用：
@@ -62,18 +64,21 @@ sudo bash install.sh
 
 # 独立运行
 sudo bash scripts/singbox/yoyo.sh
-sudo bash scripts/singbox/233boy.sh
+sudo bash scripts/system/bbr.sh
+sudo bash scripts/system/swap.sh create 2G
 ```
 
 ## 特性
 
 - 任意机器：`curl | bash` / `bash <(curl …)` 远程一键
-- 每个组件可独立运行
+- 每个组件可独立运行（多数支持子命令，便于自动化）
 - 主菜单选择安装；每级菜单 **`0` 返回**（主菜单 `0` 退出）
-- 适配 Ubuntu / Debian / Alpine（`apt` / `apk`）
-- 包装上游一键脚本，不篡改其交互流程
+- 适配 Ubuntu / Debian / Alpine（`apt` / `apk`）；系统优化类尽量兼容 RHEL
+- sing-box 类包装上游一键脚本；系统优化类为 1key 自研、可回滚
 
 ## 当前组件
+
+### sing-box
 
 | 菜单 / 一键参数 | 说明 | 独立命令 |
 |-----------------|------|----------|
@@ -90,6 +95,16 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/caigouzi121380/singbox-d
 bash <(wget -qO- -o- https://github.com/233boy/sing-box/raw/main/install.sh)
 ```
 
+### 系统优化 / 网络
+
+| 菜单 / 一键参数 | 说明 | 独立命令 / 示例 |
+|-----------------|------|-----------------|
+| bbr | 启用内核原生 BBR + fq（不换第三方内核） | `scripts/system/bbr.sh enable` |
+| swap | Swap 文件创建 / 删除 / swappiness | `scripts/system/swap.sh create 2G` |
+| timezone | 时区 + NTP（chrony / timesyncd） | `scripts/system/timezone.sh shanghai` |
+| net / net-optimize | 保守 sysctl 网络优化（可回滚） | `scripts/system/net-optimize.sh balanced` |
+| dns | DNS 预设（CF / Google / 阿里 / DNSPod） | `scripts/system/dns.sh aliyun` |
+
 ## 目录结构
 
 ```text
@@ -100,22 +115,32 @@ bash <(wget -qO- -o- https://github.com/233boy/sing-box/raw/main/install.sh)
 │   ├── common.sh
 │   └── distro.sh
 ├── scripts/
-│   └── singbox/
-│       ├── yoyo.sh
-│       └── 233boy.sh
+│   ├── singbox/
+│   │   ├── yoyo.sh
+│   │   └── 233boy.sh
+│   └── system/
+│       ├── bbr.sh
+│       ├── swap.sh
+│       ├── timezone.sh
+│       ├── net-optimize.sh
+│       └── dns.sh
 └── README.md
 ```
 
 ## 菜单示意
 
 ```text
-1key / ops-kit 装机组件
+1key 装机组件
   1) sing-box 相关
+  2) 系统优化 / 网络
   0) 退出
 
-sing-box 安装
-  1) sing-box yoyo (yyds)
-  2) sing-box 233boy
+系统优化 / 网络
+  1) BBR 拥塞控制
+  2) Swap 管理
+  3) 时区 / 时间同步
+  4) 网络 sysctl 优化
+  5) DNS 设置
   0) 返回上级
 ```
 
