@@ -112,29 +112,33 @@ menu_main() {
 show_help() {
   cat <<EOF
 
-ops-kit 用法说明
-================
+1key / ops-kit 用法说明
+======================
 
-1) 交互菜单（本脚本）
+1) 任意机器远程一键（VPS）
+   # 仓库需 Public；Private 需带 GITHUB_TOKEN
+   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
+   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
+   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) 233boy
+
+2) 本机交互菜单
    bash install.sh
-   或: ./install.sh
 
-2) 独立运行某个组件（无需菜单）
+3) 独立运行某个组件
    sudo bash scripts/singbox/yoyo.sh
    sudo bash scripts/singbox/233boy.sh
 
-3) 菜单约定
+4) 菜单约定
    - 数字选择安装项
    - 每级菜单输入 0 返回上级；主菜单 0 退出
 
-4) 系统支持
+5) 系统支持
    - Ubuntu / Debian (apt)
    - Alpine (apk)
-   - 其他系统会尽量检测并调用上游脚本（不保证成功）
 
-5) 注意
+6) 注意
    - 多数安装脚本需要 root
-   - 本仓库仅包装上游一键脚本，具体逻辑以上游为准
+   - 本仓库仅包装上游一键脚本
    - 请在合法合规场景下使用
 
 项目路径: ${OPS_KIT_ROOT}

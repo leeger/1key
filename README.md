@@ -1,38 +1,86 @@
-# ops-kit
+# 1key
 
-意见化 / 菜单化装机组件集合：把常用一键脚本统一收纳，支持**交互菜单**与**单脚本独立运行**。
+意见化 / 菜单化装机组件：把常用一键脚本收纳在一起，支持 **任意机器远程一键**、交互菜单、单脚本独立运行。
+
+仓库：https://github.com/leeger/1key
+
+## 任意机器一键（VPS / 云主机）
+
+### 方式 A：公开仓库（推荐，真正「一键」）
+
+先把仓库设为 **Public**（Settings → Danger Zone → Change visibility），然后在任意服务器执行：
+
+```bash
+# 交互菜单
+bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
+
+# 或等价写法
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)"
+
+# 直接装某个组件（跳过主菜单）
+bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
+bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) 233boy
+```
+
+无 `bash <(...)` 时可用：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh | bash
+curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh | bash -s -- yoyo
+```
+
+> `bootstrap.sh` 会自动安装 `curl`/`git`（如需要），克隆到 `/opt/1key`（root）或 `~/.1key`，再启动菜单。
+
+### 方式 B：私有仓库（当前若仍是 Private）
+
+私有库 **不能** 匿名 `curl raw`，需要带 Token：
+
+```bash
+export GITHUB_TOKEN=ghp_你的PAT   # 需勾选 repo
+
+# 下载 bootstrap + 克隆仓库都带鉴权
+bash <(curl -fsSL -H "Authorization: token ${GITHUB_TOKEN}" \
+  https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
+```
+
+或用 git 直接克隆后运行：
+
+```bash
+git clone https://x-access-token:${GITHUB_TOKEN}@github.com/leeger/1key.git /opt/1key
+bash /opt/1key/install.sh
+```
+
+**说明：** 想在任何 VPS 上像 yoyo/233boy 那样随手一键，请使用 **公开仓库**。私有库每次都要带 Token，不适合当「通用一键」。
+
+---
+
+## 本机已克隆时
+
+```bash
+cd /path/to/1key
+sudo bash install.sh
+
+# 独立运行
+sudo bash scripts/singbox/yoyo.sh
+sudo bash scripts/singbox/233boy.sh
+```
 
 ## 特性
 
-- 每个组件有独立运行命令
-- 主菜单选择安装，支持多级菜单
-- **每级菜单输入 `0` 返回**（主菜单 `0` 退出）
-- 适配 **Ubuntu / Debian / Alpine**（自动检测 `apt` / `apk`）
+- 任意机器：`curl | bash` / `bash <(curl …)` 远程一键
+- 每个组件可独立运行
+- 主菜单选择安装；每级菜单 **`0` 返回**（主菜单 `0` 退出）
+- 适配 Ubuntu / Debian / Alpine（`apt` / `apk`）
 - 包装上游一键脚本，不篡改其交互流程
-
-## 快速开始
-
-```bash
-# 克隆后
-cd ops-kit
-chmod +x install.sh scripts/singbox/*.sh
-
-# 交互菜单
-sudo bash install.sh
-# 或
-./install.sh
-```
 
 ## 当前组件
 
-### sing-box
+| 菜单 / 一键参数 | 说明 | 独立命令 |
+|-----------------|------|----------|
+| yoyo | [singbox-deploy yyds](https://github.com/caigouzi121380/singbox-deploy) | `scripts/singbox/yoyo.sh` |
+| 233boy | [233boy/sing-box](https://github.com/233boy/sing-box) | `scripts/singbox/233boy.sh` |
 
-| 菜单 | 说明 | 独立运行 |
-|------|------|----------|
-| yoyo (yyds) | [caigouzi121380/singbox-deploy](https://github.com/caigouzi121380/singbox-deploy) | `sudo bash scripts/singbox/yoyo.sh` |
-| 233boy | [233boy/sing-box](https://github.com/233boy/sing-box) | `sudo bash scripts/singbox/233boy.sh` |
-
-上游原始命令（本仓库等价包装）：
+上游原始命令：
 
 ```bash
 # yoyo
@@ -45,22 +93,23 @@ bash <(wget -qO- -o- https://github.com/233boy/sing-box/raw/main/install.sh)
 ## 目录结构
 
 ```text
-ops-kit/
+1key/
+├── bootstrap.sh               # 远程一键入口（任意机器）
 ├── install.sh                 # 主菜单入口
 ├── lib/
-│   ├── common.sh              # 日志、确认、菜单、远程执行
-│   └── distro.sh              # 发行版检测、包管理适配
+│   ├── common.sh
+│   └── distro.sh
 ├── scripts/
 │   └── singbox/
-│       ├── yoyo.sh            # 可独立运行
-│       └── 233boy.sh          # 可独立运行
+│       ├── yoyo.sh
+│       └── 233boy.sh
 └── README.md
 ```
 
 ## 菜单示意
 
 ```text
-ops-kit 装机组件
+1key / ops-kit 装机组件
   1) sing-box 相关
   0) 退出
 
@@ -70,18 +119,28 @@ sing-box 安装
   0) 返回上级
 ```
 
+## 环境变量（可选）
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `REPO_URL` | `https://github.com/leeger/1key.git` | 仓库地址 |
+| `REPO_BRANCH` | `main` | 分支 |
+| `INSTALL_DIR` | `/opt/1key` 或 `~/.1key` | 克隆目录 |
+| `GITHUB_TOKEN` | 空 | 私有库鉴权 |
+| `FORCE_UPDATE` | `0` | `1` 时强制更新 |
+
 ## 系统要求
 
 - `bash`
-- `curl` 或 `wget`（缺失时会在 Debian/Ubuntu/Alpine 上尝试自动安装 curl）
+- 可访问 GitHub（或自备镜像 / Token）
 - 安装类操作通常需要 **root**
 
 ## 扩展新组件
 
-1. 在 `scripts/<分类>/` 下新增可独立运行的 `xxx.sh`
-2. `source lib/common.sh` 与 `lib/distro.sh`
-3. 在 `install.sh` 对应子菜单中增加一项
+1. 在 `scripts/<分类>/` 新增可独立运行脚本  
+2. `source lib/common.sh` 与 `lib/distro.sh`  
+3. 在 `install.sh` 加菜单项，在 `bootstrap.sh` 的 `run_target` 加快捷参数  
 
 ## 免责声明
 
-本项目仅为脚本聚合与菜单封装，**不包含**代理协议实现。请遵守当地法律法规与服务器提供商条款，仅在合法授权环境中使用。上游脚本版权归原作者所有。
+本项目仅为脚本聚合与菜单封装。请遵守当地法律法规与服务器条款，仅在合法授权环境中使用。上游脚本版权归原作者所有。
