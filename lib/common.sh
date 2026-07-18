@@ -120,6 +120,12 @@ ensure_downloader() {
         yum install -y curl ca-certificates
       fi
       ;;
+    arch)
+      pacman -Sy --noconfirm curl ca-certificates
+      ;;
+    suse)
+      zypper --non-interactive install -y curl ca-certificates
+      ;;
     *)
       err "无法自动安装 curl，请手动安装后重试"
       return 1

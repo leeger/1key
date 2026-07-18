@@ -14,7 +14,7 @@ source "${OPS_KIT_ROOT}/lib/common.sh"
 # shellcheck source=/dev/null
 source "${OPS_KIT_ROOT}/lib/distro.sh"
 
-VERSION="0.2.0"
+VERSION="0.3.0"
 
 run_script() {
   local script_path="$1"
@@ -82,8 +82,9 @@ menu_system() {
     menu_header "系统优化 / 网络"
     print_distro_info
     echo ""
-    echo "  1) BBR 拥塞控制（内核原生）"
+    echo "  1) BBR / 网络加速（全系统，含一键）"
     echo "     独立命令: bash scripts/system/bbr.sh"
+    echo "     一键:     bash scripts/system/bbr.sh onekey"
     echo ""
     echo "  2) Swap 管理"
     echo "     独立命令: bash scripts/system/swap.sh"
@@ -166,6 +167,7 @@ show_help() {
    bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
    bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
    bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
+   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr onekey
    bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) swap
 
 2) 本机交互菜单
@@ -175,6 +177,7 @@ show_help() {
    sudo bash scripts/singbox/yoyo.sh
    sudo bash scripts/singbox/233boy.sh
    sudo bash scripts/system/bbr.sh
+   sudo bash scripts/system/bbr.sh onekey
    sudo bash scripts/system/swap.sh
    sudo bash scripts/system/timezone.sh
    sudo bash scripts/system/net-optimize.sh
@@ -187,11 +190,13 @@ show_help() {
 5) 系统支持
    - Ubuntu / Debian (apt)
    - Alpine (apk)
-   - 系统优化脚本亦尽量兼容 RHEL 系
+   - RHEL / Rocky / Alma / Fedora (dnf/yum)
+   - Arch / openSUSE（包管理与系统优化脚本）
 
 6) 注意
    - 多数安装脚本需要 root
    - sing-box 类为上游一键包装；系统优化类为 1key 自研
+   - BBR 默认用内核原生；Debian/Ubuntu 可选手动装 byJoey BBRv3 内核
    - 请在合法合规场景下使用
 
 项目路径: ${OPS_KIT_ROOT}

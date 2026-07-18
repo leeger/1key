@@ -10,6 +10,7 @@
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) 233boy
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
+#   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr onekey
 #   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) swap
 #
 # ========== 私有仓库 ==========
@@ -159,8 +160,12 @@ run_target() {
       info "直接运行: sing-box 233boy"
       exec bash "${INSTALL_DIR}/scripts/singbox/233boy.sh"
       ;;
-    bbr)
-      info "直接运行: BBR"
+    bbr|bbrv3|onekey-bbr)
+      info "直接运行: BBR / 网络加速"
+      # bbr onekey / bbr enable / 无参进菜单
+      if [[ "${target}" == "onekey-bbr" ]]; then
+        exec bash "${INSTALL_DIR}/scripts/system/bbr.sh" onekey
+      fi
       exec bash "${INSTALL_DIR}/scripts/system/bbr.sh" "${@:2}"
       ;;
     swap)
@@ -182,12 +187,16 @@ run_target() {
     -h|--help|help)
       cat <<EOF
 用法:
-  bootstrap.sh [menu|yoyo|233boy|bbr|swap|timezone|net|dns]
+  bootstrap.sh [menu|yoyo|233boy|bbr|swap|timezone|net|dns] [子命令...]
 
 任意机器一键（公开仓库）:
   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh)
   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) yoyo
   bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr
+  bash <(curl -fsSL https://raw.githubusercontent.com/leeger/1key/main/bootstrap.sh) bbr onekey
+
+BBR 子命令示例:
+  bbr onekey | enable | disable | status | apac | smart | byjoey
 
 私有仓库:
   export GITHUB_TOKEN=ghp_xxx

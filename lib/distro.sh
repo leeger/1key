@@ -5,8 +5,8 @@
 #   DISTRO_ID       e.g. ubuntu, debian, alpine
 #   DISTRO_ID_LIKE  e.g. debian
 #   DISTRO_VERSION  e.g. 22.04
-#   DISTRO_FAMILY   debian | ubuntu | alpine | rhel | unknown
-#   PKG_MGR         apt | apk | dnf | yum | unknown
+#   DISTRO_FAMILY   debian | ubuntu | alpine | rhel | arch | suse | unknown
+#   PKG_MGR         apt | apk | dnf | yum | pacman | zypper | unknown
 #   INIT_SYSTEM     systemd | openrc | unknown
 
 detect_distro() {
@@ -37,13 +37,19 @@ detect_distro() {
   elif echo "${blob}" | grep -Eq "debian"; then
     DISTRO_FAMILY="debian"
     PKG_MGR="apt"
-  elif echo "${blob}" | grep -Eq "centos|rhel|fedora|rocky|alma"; then
+  elif echo "${blob}" | grep -Eq "centos|rhel|fedora|rocky|alma|oracle|amzn"; then
     DISTRO_FAMILY="rhel"
     if command -v dnf >/dev/null 2>&1; then
       PKG_MGR="dnf"
     else
       PKG_MGR="yum"
     fi
+  elif echo "${blob}" | grep -Eq "arch|manjaro|endeavouros"; then
+    DISTRO_FAMILY="arch"
+    PKG_MGR="pacman"
+  elif echo "${blob}" | grep -Eq "suse|opensuse|sles"; then
+    DISTRO_FAMILY="suse"
+    PKG_MGR="zypper"
   else
     # 兜底：根据包管理器猜
     if command -v apk >/dev/null 2>&1; then
@@ -58,6 +64,12 @@ detect_distro() {
     elif command -v yum >/dev/null 2>&1; then
       DISTRO_FAMILY="rhel"
       PKG_MGR="yum"
+    elif command -v pacman >/dev/null 2>&1; then
+      DISTRO_FAMILY="arch"
+      PKG_MGR="pacman"
+    elif command -v zypper >/dev/null 2>&1; then
+      DISTRO_FAMILY="suse"
+      PKG_MGR="zypper"
     fi
   fi
 
@@ -93,6 +105,12 @@ pkg_install() {
     yum)
       yum install -y "${pkgs[@]}"
       ;;
+    pacman)
+      pacman -Sy --noconfirm "${pkgs[@]}"
+      ;;
+    zypper)
+      zypper --non-interactive install -y "${pkgs[@]}"
+      ;;
     *)
       err "不支持的包管理器: ${PKG_MGR}"
       return 1
@@ -110,7 +128,7 @@ print_distro_info() {
 is_supported_distro() {
   detect_distro
   case "${DISTRO_FAMILY}" in
-    ubuntu|debian|alpine) return 0 ;;
+    ubuntu|debian|alpine|rhel|arch|suse) return 0 ;;
     *) return 1 ;;
   esac
 }
