@@ -161,8 +161,123 @@ can_install_byjoey_kernel() {
   return 1
 }
 
+# ---------- sysctl 读写（兼容 busybox / 受限环境）----------
+# key 如 net.core.default_qdisc → /proc/sys/net/core/default_qdisc
+sysctl_path() {
+  local key="$1"
+  echo "/proc/sys/${key//.//}"
+}
+
+sysctl_get() {
+  local key="$1"
+  local path
+  path="$(sysctl_path "${key}")"
+  if [[ -r "${path}" ]]; then
+    tr -d '\n' <"${path}"
+    return 0
+  fi
+  # busybox/procps 兜底
+  sysctl -n "${key}" 2>/dev/null | tr -d '\n' || true
+}
+
+# 设置 sysctl：优先写 /proc，再试 sysctl -w（Alpine busybox 行为不一致）
+sysctl_set() {
+  local key="$1"
+  local val="$2"
+  local path
+  path="$(sysctl_path "${key}")"
+
+  if [[ -e "${path}" ]]; then
+    if [[ -w "${path}" ]]; then
+      if printf '%s' "${val}" >"${path}" 2>/dev/null; then
+        # 校验
+        if [[ "$(sysctl_get "${key}")" == "${val}" ]]; then
+          return 0
+        fi
+      fi
+    else
+      # 存在但不可写：容器/权限限制
+      return 1
+    fi
+  fi
+
+  if command -v sysctl >/dev/null 2>&1; then
+    if sysctl -w "${key}=${val}" >/dev/null 2>&1; then
+      [[ "$(sysctl_get "${key}")" == "${val}" ]] && return 0
+    fi
+    # 有的实现要带空格
+    if sysctl -w "${key} = ${val}" >/dev/null 2>&1; then
+      [[ "$(sysctl_get "${key}")" == "${val}" ]] && return 0
+    fi
+  fi
+  return 1
+}
+
+print_sysctl_diag() {
+  local kver path
+  kver="$(uname -r)"
+  path="$(sysctl_path net.core.default_qdisc)"
+  warn "诊断信息:" >&2
+  echo "  uname -r:     ${kver}" >&2
+  echo "  sysctl 命令:  $(command -v sysctl 2>/dev/null || echo 无)" >&2
+  echo "  modprobe:     $(command -v modprobe 2>/dev/null || echo 无)" >&2
+  echo "  default_qdisc 路径: ${path}" >&2
+  if [[ -e "${path}" ]]; then
+    echo "  当前值:       $(cat "${path}" 2>/dev/null || echo 读失败)" >&2
+    echo "  可写:         $( [[ -w "${path}" ]] && echo 是 || echo 否 )" >&2
+  else
+    echo "  路径不存在（异常内核/非完整 Linux 网络栈）" >&2
+  fi
+  echo "  modules 目录: $( [[ -d /lib/modules/${kver} ]] && echo 存在 || echo 缺失 )" >&2
+  if [[ -d "/lib/modules/${kver}/kernel/net/sched" ]]; then
+    echo "  sched 模块:   $(ls "/lib/modules/${kver}/kernel/net/sched" 2>/dev/null | head -8 | tr '\n' ' ')" >&2
+  else
+    echo "  sched 模块:   目录不存在" >&2
+  fi
+  echo "  可用拥塞控制: $(get_available_cc)" >&2
+}
+
+# Alpine：补齐当前运行内核的模块包并 depmod
+ensure_kernel_modules() {
+  detect_distro
+  local kver flavor
+  kver="$(uname -r)"
+
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe sch_fq 2>/dev/null || true
+    modprobe sch_fq_codel 2>/dev/null || true
+    modprobe sch_cake 2>/dev/null || true
+    modprobe sch_fq_pie 2>/dev/null || true
+  fi
+
+  [[ "${DISTRO_FAMILY}" == "alpine" ]] || return 0
+
+  # 缺 modules 树：常见于只装了内核镜像、或内核已升级未装对应包
+  if [[ ! -d "/lib/modules/${kver}" ]]; then
+    flavor="$(echo "${kver}" | awk -F- '{print $NF}')"
+    warn "缺少 /lib/modules/${kver}，尝试安装 linux-${flavor} ..."
+    if [[ -n "${flavor}" ]] && [[ "${flavor}" != "${kver}" ]]; then
+      pkg_install "linux-${flavor}" 2>/dev/null || \
+        apk add --no-cache "linux-${flavor}" 2>/dev/null || \
+        warn "自动安装 linux-${flavor} 失败，请手动: apk add linux-${flavor}"
+    fi
+  fi
+
+  if command -v depmod >/dev/null 2>&1 && [[ -d "/lib/modules/${kver}" ]]; then
+    depmod -a "${kver}" 2>/dev/null || depmod -a 2>/dev/null || true
+  fi
+
+  # 再加载一次
+  if command -v modprobe >/dev/null 2>&1; then
+    modprobe tcp_bbr 2>/dev/null || true
+    modprobe sch_fq 2>/dev/null || true
+    modprobe sch_fq_codel 2>/dev/null || true
+    modprobe sch_cake 2>/dev/null || true
+  fi
+}
+
 # ---------- 模块 / 队列 ----------
-# Alpine linux-virt 等精简内核常未编 sch_fq，需回退到 fq_codel 等
 load_qdisc_module() {
   local qdisc_name="$1"
   local module_name="sch_${qdisc_name}"
@@ -177,39 +292,39 @@ load_qdisc_module() {
     return 0
   fi
 
-  # 已内建时 modprobe 可能失败，不算致命
   if modprobe "${module_name}" 2>/dev/null; then
     return 0
   fi
 
-  # 模块文件是否存在（便于诊断）
-  if [[ -d "/lib/modules/${kver}" ]] && ! find "/lib/modules/${kver}" -name "${module_name}.ko*" 2>/dev/null | grep -q .; then
-    return 1
+  # 直接 insmod 路径（部分 Alpine 未正确 depmod）
+  local ko
+  ko="$(find "/lib/modules/${kver}" -name "${module_name}.ko*" 2>/dev/null | head -n1 || true)"
+  if [[ -n "${ko}" ]] && command -v insmod >/dev/null 2>&1; then
+    insmod "${ko}" 2>/dev/null && return 0
   fi
   return 1
 }
 
-# 探测 qdisc 是否能真正被 sysctl 接受（试设后恢复）
+# 探测 qdisc 是否能真正被接受（试设后恢复）
 qdisc_is_usable() {
   local qdisc_name="$1"
   local previous applied
 
-  previous="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  previous="$(sysctl_get net.core.default_qdisc)"
   load_qdisc_module "${qdisc_name}" || true
 
-  if ! sysctl -w "net.core.default_qdisc=${qdisc_name}" >/dev/null 2>&1; then
+  if ! sysctl_set net.core.default_qdisc "${qdisc_name}"; then
     return 1
   fi
-  applied="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
-  if [[ -n "${previous}" ]]; then
-    sysctl -w "net.core.default_qdisc=${previous}" >/dev/null 2>&1 || true
+  applied="$(sysctl_get net.core.default_qdisc)"
+  if [[ -n "${previous}" && "${previous}" != "${qdisc_name}" ]]; then
+    sysctl_set net.core.default_qdisc "${previous}" || true
   fi
   [[ "${applied}" == "${qdisc_name}" ]]
 }
 
 # 解析最终要用的 qdisc：优先用户指定，否则按候选列表自动选
-# 用法: resolve_qdisc [preferred]
-# 打印选定名称到 stdout；失败返回 1
+# 打印选定名称到 stdout；全部失败则打印空并返回 1（调用方仍可只开 BBR）
 resolve_qdisc() {
   local preferred="${1:-}"
   local candidates=()
@@ -218,8 +333,7 @@ resolve_qdisc() {
   if [[ -n "${preferred}" && "${preferred}" != "auto" ]]; then
     candidates+=("${preferred}")
   fi
-  # 推荐顺序：fq（BBR 官方推荐）→ fq_codel（Alpine 常见）→ cake → fq_pie
-  for q in fq fq_codel cake fq_pie; do
+  for q in fq fq_codel cake fq_pie pfifo_fast fq_codel noqueue; do
     local seen=0 c
     for c in "${candidates[@]+"${candidates[@]}"}"; do
       [[ "$c" == "$q" ]] && seen=1 && break
@@ -230,26 +344,13 @@ resolve_qdisc() {
   for q in "${candidates[@]}"; do
     if qdisc_is_usable "${q}"; then
       if [[ -n "${preferred}" && "${preferred}" != "auto" && "${q}" != "${preferred}" ]]; then
-        # 必须走 stderr，避免被 $(resolve_qdisc) 捕获
-        warn "队列 ${preferred} 不可用（常见于 Alpine 精简内核缺少 sch_${preferred}），回退到 ${q}" >&2
+        warn "队列 ${preferred} 不可用，回退到 ${q}" >&2
       fi
       printf '%s\n' "${q}"
       return 0
     fi
   done
 
-  # 最后尝试 pfifo_fast / noqueue 等内建（至少不阻断启用 BBR）
-  for q in pfifo_fast noqueue; do
-    if qdisc_is_usable "${q}"; then
-      warn "高级队列均不可用，回退到 ${q}（仍可启用 BBR 拥塞控制）" >&2
-      printf '%s\n' "${q}"
-      return 0
-    fi
-  done
-
-  err "无法找到任何可用的 default_qdisc"
-  err "提示: Alpine 请确认已安装当前内核模块包，例如:"
-  err "  apk info | grep linux; ls /lib/modules/\$(uname -r)/kernel/net/sched/ 2>/dev/null | head"
   return 1
 }
 
@@ -257,8 +358,7 @@ persist_qdisc_module() {
   local qdisc_name="$1"
   local module_name="sch_${qdisc_name}"
 
-  # 内建或无 modprobe 时不写
-  if [[ "${qdisc_name}" == "pfifo_fast" || "${qdisc_name}" == "noqueue" ]]; then
+  if [[ -z "${qdisc_name}" || "${qdisc_name}" == "pfifo_fast" || "${qdisc_name}" == "noqueue" ]]; then
     rm -f "${MODULES_CONF}" 2>/dev/null || true
     return 0
   fi
@@ -267,17 +367,15 @@ persist_qdisc_module() {
     return 0
   fi
 
-  # 模块存在则写入开机加载（含 fq，Alpine 上多为模块）
   if modinfo "${module_name}" >/dev/null 2>&1 || lsmod 2>/dev/null | grep -q "^${module_name//-/_}"; then
     mkdir -p "$(dirname "${MODULES_CONF}")"
     echo "${module_name}" >"${MODULES_CONF}"
-    # OpenRC / Alpine: modules-load.d 需 openrc 或启动脚本支持；同时写入 /etc/modules
     if [[ -f /etc/modules ]] && ! grep -qxF "${module_name}" /etc/modules 2>/dev/null; then
       echo "${module_name}" >>/etc/modules
     fi
+    # Alpine OpenRC 还读 /etc/modules-load.d 需 openrc 较新版本；双写无害
     ok "开机将自动加载 ${module_name}"
   else
-    # 可能是内建
     rm -f "${MODULES_CONF}" 2>/dev/null || true
   fi
 }
@@ -293,8 +391,10 @@ apply_qdisc_to_ifaces() {
   local qdisc_name="$1"
   local iface applied=0
 
+  [[ -n "${qdisc_name}" ]] || return 0
+
   if ! command -v tc >/dev/null 2>&1; then
-    warn "无 tc 命令，仅设置 default_qdisc，当前网卡队列可能需新建连接后生效"
+    warn "无 tc 命令，仅设置 default_qdisc（如有）"
     return 0
   fi
 
@@ -304,42 +404,44 @@ apply_qdisc_to_ifaces() {
       ok "网卡 ${iface} → ${qdisc_name}"
       applied=1
     else
-      warn "网卡 ${iface} 切换 ${qdisc_name} 失败（可能不支持）"
+      warn "网卡 ${iface} 切换 ${qdisc_name} 失败（可忽略）"
     fi
   done < <(get_default_route_ifaces)
 
   if [[ ${applied} -eq 0 ]]; then
-    warn "未找到默认可切换网卡，已仅写入 default_qdisc"
+    warn "未切换当前网卡队列（可能环境限制）；default_qdisc 仍对新建队列生效"
   fi
 }
 
 sysctl_apply_file() {
   local f="$1"
   [[ -f "$f" ]] || return 0
-  if sysctl -p "$f" >/dev/null 2>&1; then
-    return 0
-  fi
-  # 逐行兼容：忽略不支持的键
   while IFS= read -r line || [[ -n "${line}" ]]; do
     [[ -z "${line}" || "${line}" =~ ^[[:space:]]*# ]] && continue
     local key val
-    key="$(echo "${line}" | sed -E 's/[[:space:]]*=[[:space:]]*/=/; s/[[:space:]]+$//')"
-    sysctl -w "${key}" >/dev/null 2>&1 || true
+    key="$(echo "${line}" | sed -E 's/[[:space:]]*=[[:space:]]*/|/; s/[[:space:]]+$//' | cut -d'|' -f1)"
+    val="$(echo "${line}" | sed -E 's/[[:space:]]*=[[:space:]]*/|/; s/[[:space:]]+$//' | cut -d'|' -f2-)"
+    [[ -n "${key}" && -n "${val}" ]] || continue
+    sysctl_set "${key}" "${val}" || true
   done <"$f"
 }
 
 # ---------- 启用 / 关闭 BBR ----------
 # enable_bbr_qdisc [algo] [qdisc|auto] [persist 0|1]
+# 注意：qdisc 全部失败时仍会启用 BBR（不中断 onekey）
 enable_bbr_qdisc() {
   local algo="${1:-bbr}"
   local qdisc_req="${2:-auto}"
   local persist="${3:-1}"
   local qdisc=""
-  local sysctl_err=""
+  local qdisc_ok=0
+
+  ensure_kernel_modules
 
   if [[ "${algo}" == "bbr" ]] && ! kernel_supports_bbr; then
     err "当前内核似乎不支持 BBR（通常需 Linux 4.9+）"
-    err "可升级系统内核；或在 Debian/Ubuntu 上使用菜单「安装 byJoey BBRv3 内核」"
+    print_sysctl_diag
+    err "Alpine 可试: apk add linux-virt 或 linux-lts 后 reboot，再执行 onekey"
     return 1
   fi
 
@@ -347,55 +449,73 @@ enable_bbr_qdisc() {
 
   if [[ "${algo}" == "bbr" ]] && ! grep -qw bbr <<<"$(get_available_cc)"; then
     err "BBR 不在可用列表: $(get_available_cc)"
+    print_sysctl_diag
     return 1
   fi
 
-  # 自动选择可用队列；Alpine 上 fq 常缺失，会回退 fq_codel
-  if [[ "${qdisc_req}" == "auto" || -z "${qdisc_req}" ]]; then
-    qdisc="$(resolve_qdisc auto)" || return 1
-  else
-    qdisc="$(resolve_qdisc "${qdisc_req}")" || return 1
-  fi
-
-  load_qdisc_module "${qdisc}" || true
-
-  if ! sysctl_err="$(sysctl -w "net.core.default_qdisc=${qdisc}" 2>&1)"; then
-    err "无法设置 default_qdisc=${qdisc}"
-    [[ -n "${sysctl_err}" ]] && err "  sysctl: ${sysctl_err}"
-    return 1
-  fi
-  if ! sysctl_err="$(sysctl -w "net.ipv4.tcp_congestion_control=${algo}" 2>&1)"; then
+  # 1) 先启用 BBR（核心目标；与 qdisc 解耦）
+  if ! sysctl_set net.ipv4.tcp_congestion_control "${algo}"; then
     err "无法设置 tcp_congestion_control=${algo}"
-    [[ -n "${sysctl_err}" ]] && err "  sysctl: ${sysctl_err}"
+    print_sysctl_diag
     return 1
   fi
-
-  # 验证 default_qdisc 确实生效
-  local new_q
-  new_q="$(get_qdisc)"
-  if [[ "${new_q}" != "${qdisc}" ]]; then
-    err "设置后 default_qdisc 仍为 ${new_q}（期望 ${qdisc}）"
+  if [[ "$(sysctl_get net.ipv4.tcp_congestion_control)" != "${algo}" ]]; then
+    err "启用失败：拥塞控制仍为 $(sysctl_get net.ipv4.tcp_congestion_control)"
     return 1
   fi
+  ok "已启用拥塞控制: ${algo}"
 
-  apply_qdisc_to_ifaces "${qdisc}" || true
-
-  local new_cc
-  new_cc="$(get_cc)"
-  if [[ "${new_cc}" != "${algo}" ]]; then
-    err "启用失败：拥塞控制仍为 ${new_cc}"
-    return 1
+  # 2) 再尝试队列（失败只警告）
+  if [[ "${qdisc_req}" == "auto" || -z "${qdisc_req}" ]]; then
+    qdisc="$(resolve_qdisc auto || true)"
+  else
+    qdisc="$(resolve_qdisc "${qdisc_req}" || true)"
   fi
-  ok "已启用 ${algo} + ${qdisc}"
+  qdisc="$(echo "${qdisc}" | tr -d '\r' | tail -n1)"
+
+  if [[ -n "${qdisc}" ]]; then
+    load_qdisc_module "${qdisc}" || true
+    if sysctl_set net.core.default_qdisc "${qdisc}"; then
+      qdisc_ok=1
+      apply_qdisc_to_ifaces "${qdisc}" || true
+      ok "已设置默认队列: ${qdisc}"
+    else
+      warn "无法设置 default_qdisc=${qdisc}，继续使用当前: $(sysctl_get net.core.default_qdisc)"
+      qdisc=""
+    fi
+  else
+    warn "当前环境无法切换 default_qdisc（容器限制或缺少内核 sched 模块）"
+    warn "BBR 已启用，队列保持: $(sysctl_get net.core.default_qdisc)"
+    print_sysctl_diag
+    if [[ "${DISTRO_FAMILY}" == "alpine" ]]; then
+      warn "Alpine 建议: apk add kmod iproute2 && apk add linux-\$(uname -r | awk -F- '{print \$NF}') && reboot"
+    fi
+  fi
 
   if [[ "${persist}" == "1" ]]; then
     mkdir -p "$(dirname "${SYSCTL_BBR}")"
-    cat >"${SYSCTL_BBR}" <<EOF
-# managed by 1key — BBR / qdisc
-net.core.default_qdisc = ${qdisc}
-net.ipv4.tcp_congestion_control = ${algo}
-EOF
-    persist_qdisc_module "${qdisc}"
+    {
+      echo "# managed by 1key — BBR / qdisc"
+      echo "net.ipv4.tcp_congestion_control = ${algo}"
+      if [[ ${qdisc_ok} -eq 1 && -n "${qdisc}" ]]; then
+        echo "net.core.default_qdisc = ${qdisc}"
+      fi
+    } >"${SYSCTL_BBR}"
+    if [[ ${qdisc_ok} -eq 1 && -n "${qdisc}" ]]; then
+      persist_qdisc_module "${qdisc}"
+    fi
+    # Alpine OpenRC: 确保 sysctl 服务会加载 sysctl.d
+    if [[ "${DISTRO_FAMILY}" == "alpine" ]] && command -v rc-update >/dev/null 2>&1; then
+      rc-update add sysctl default 2>/dev/null || true
+      # 部分镜像用 /etc/sysctl.conf include
+      if [[ -f /etc/sysctl.conf ]] && ! grep -q '99-1key-bbr' /etc/sysctl.conf 2>/dev/null; then
+        if ! grep -q '^include /etc/sysctl.d' /etc/sysctl.conf 2>/dev/null \
+           && ! grep -rq . /etc/sysctl.d 2>/dev/null; then
+          # openrc-sysctl 通常已读 sysctl.d，无需改 conf
+          :
+        fi
+      fi
+    fi
     sysctl_apply_file "${SYSCTL_BBR}"
     ok "已永久写入 ${SYSCTL_BBR}"
   else
@@ -405,22 +525,21 @@ EOF
 
 disable_bbr() {
   local cc="cubic"
-  local qdisc="fq_codel"
+  local qdisc=""
 
   if ! grep -qw cubic <<<"$(get_available_cc)"; then
     cc="$(awk '{print $1}' /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || echo reno)"
   fi
-  # 回退到可用队列
-  if ! qdisc_is_usable "${qdisc}"; then
-    qdisc="$(resolve_qdisc auto 2>/dev/null || echo pfifo_fast)"
-  fi
+  qdisc="$(resolve_qdisc fq_codel 2>/dev/null || true)"
+  qdisc="$(echo "${qdisc}" | tr -d '\r' | tail -n1)"
 
   rm -f "${SYSCTL_BBR}" "${MODULES_CONF}" 2>/dev/null || true
-  # Alpine /etc/modules 中由本脚本追加的行可保留或忽略
-  sysctl -w "net.ipv4.tcp_congestion_control=${cc}" >/dev/null 2>&1 || true
-  sysctl -w "net.core.default_qdisc=${qdisc}" >/dev/null 2>&1 || true
-  apply_qdisc_to_ifaces "${qdisc}" 2>/dev/null || true
-  ok "已关闭 BBR 持久配置，当前: $(get_cc) / $(get_qdisc)"
+  sysctl_set net.ipv4.tcp_congestion_control "${cc}" || true
+  if [[ -n "${qdisc}" ]]; then
+    sysctl_set net.core.default_qdisc "${qdisc}" || true
+    apply_qdisc_to_ifaces "${qdisc}" 2>/dev/null || true
+  fi
+  ok "已关闭 BBR 持久配置，当前: $(sysctl_get net.ipv4.tcp_congestion_control) / $(sysctl_get net.core.default_qdisc)"
 }
 
 # ---------- TCP 调优 ----------
