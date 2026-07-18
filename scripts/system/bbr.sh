@@ -34,6 +34,14 @@ ensure_tools() {
   command -v sysctl >/dev/null 2>&1 || need+=(procps)
   command -v awk >/dev/null 2>&1 || need+=(gawk)
   command -v sed >/dev/null 2>&1 || need+=(sed)
+  # Alpine 需要 kmod 才有可用的 modprobe
+  if ! command -v modprobe >/dev/null 2>&1; then
+    case "${PKG_MGR:-}" in
+      apk) need+=(kmod) ;;
+      apt) need+=(kmod) ;;
+      *) need+=(kmod) ;;
+    esac
+  fi
   command -v ip >/dev/null 2>&1 || need+=(iproute2)
   command -v tc >/dev/null 2>&1 || {
     # alpine: iproute2 含 tc；部分系统包名不同
@@ -112,6 +120,19 @@ show_status() {
   [[ -f "${SYSCTL_BBR}" ]] && echo "  持久 BBR: ${SYSCTL_BBR}" || echo "  持久 BBR: 无"
   [[ -f "${SYSCTL_TUNE}" ]] && echo "  持久调优: ${SYSCTL_TUNE}" || echo "  持久调优: 无"
   [[ -f "${MODULES_CONF}" ]] && echo "  模块加载: ${MODULES_CONF}" || true
+  # 探测常见 qdisc 可用性（便于 Alpine 等精简内核排查）
+  local q probe_list="fq fq_codel cake fq_pie"
+  local usable=""
+  for q in ${probe_list}; do
+    if qdisc_is_usable "${q}"; then
+      usable="${usable} ${q}"
+    fi
+  done
+  if [[ -n "${usable}" ]]; then
+    echo "  可用队列: ${usable# }"
+  else
+    echo "  可用队列: 未能探测（将尝试 pfifo_fast 等内建队列）"
+  fi
   echo ""
 }
 
@@ -141,25 +162,103 @@ can_install_byjoey_kernel() {
 }
 
 # ---------- 模块 / 队列 ----------
+# Alpine linux-virt 等精简内核常未编 sch_fq，需回退到 fq_codel 等
 load_qdisc_module() {
   local qdisc_name="$1"
   local module_name="sch_${qdisc_name}"
+  local kver
+  kver="$(uname -r)"
 
   if ! command -v modprobe >/dev/null 2>&1; then
-    return 0
+    return 1
   fi
+
   if lsmod 2>/dev/null | grep -q "^${module_name//-/_}"; then
     return 0
   fi
-  modprobe "${module_name}" 2>/dev/null || true
+
+  # 已内建时 modprobe 可能失败，不算致命
+  if modprobe "${module_name}" 2>/dev/null; then
+    return 0
+  fi
+
+  # 模块文件是否存在（便于诊断）
+  if [[ -d "/lib/modules/${kver}" ]] && ! find "/lib/modules/${kver}" -name "${module_name}.ko*" 2>/dev/null | grep -q .; then
+    return 1
+  fi
+  return 1
+}
+
+# 探测 qdisc 是否能真正被 sysctl 接受（试设后恢复）
+qdisc_is_usable() {
+  local qdisc_name="$1"
+  local previous applied
+
+  previous="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  load_qdisc_module "${qdisc_name}" || true
+
+  if ! sysctl -w "net.core.default_qdisc=${qdisc_name}" >/dev/null 2>&1; then
+    return 1
+  fi
+  applied="$(sysctl -n net.core.default_qdisc 2>/dev/null || true)"
+  if [[ -n "${previous}" ]]; then
+    sysctl -w "net.core.default_qdisc=${previous}" >/dev/null 2>&1 || true
+  fi
+  [[ "${applied}" == "${qdisc_name}" ]]
+}
+
+# 解析最终要用的 qdisc：优先用户指定，否则按候选列表自动选
+# 用法: resolve_qdisc [preferred]
+# 打印选定名称到 stdout；失败返回 1
+resolve_qdisc() {
+  local preferred="${1:-}"
+  local candidates=()
+  local q
+
+  if [[ -n "${preferred}" && "${preferred}" != "auto" ]]; then
+    candidates+=("${preferred}")
+  fi
+  # 推荐顺序：fq（BBR 官方推荐）→ fq_codel（Alpine 常见）→ cake → fq_pie
+  for q in fq fq_codel cake fq_pie; do
+    local seen=0 c
+    for c in "${candidates[@]+"${candidates[@]}"}"; do
+      [[ "$c" == "$q" ]] && seen=1 && break
+    done
+    [[ $seen -eq 0 ]] && candidates+=("$q")
+  done
+
+  for q in "${candidates[@]}"; do
+    if qdisc_is_usable "${q}"; then
+      if [[ -n "${preferred}" && "${preferred}" != "auto" && "${q}" != "${preferred}" ]]; then
+        # 必须走 stderr，避免被 $(resolve_qdisc) 捕获
+        warn "队列 ${preferred} 不可用（常见于 Alpine 精简内核缺少 sch_${preferred}），回退到 ${q}" >&2
+      fi
+      printf '%s\n' "${q}"
+      return 0
+    fi
+  done
+
+  # 最后尝试 pfifo_fast / noqueue 等内建（至少不阻断启用 BBR）
+  for q in pfifo_fast noqueue; do
+    if qdisc_is_usable "${q}"; then
+      warn "高级队列均不可用，回退到 ${q}（仍可启用 BBR 拥塞控制）" >&2
+      printf '%s\n' "${q}"
+      return 0
+    fi
+  done
+
+  err "无法找到任何可用的 default_qdisc"
+  err "提示: Alpine 请确认已安装当前内核模块包，例如:"
+  err "  apk info | grep linux; ls /lib/modules/\$(uname -r)/kernel/net/sched/ 2>/dev/null | head"
+  return 1
 }
 
 persist_qdisc_module() {
   local qdisc_name="$1"
   local module_name="sch_${qdisc_name}"
 
-  # fq 多为内建，不必写 modules-load
-  if [[ "${qdisc_name}" == "fq" ]]; then
+  # 内建或无 modprobe 时不写
+  if [[ "${qdisc_name}" == "pfifo_fast" || "${qdisc_name}" == "noqueue" ]]; then
     rm -f "${MODULES_CONF}" 2>/dev/null || true
     return 0
   fi
@@ -168,11 +267,17 @@ persist_qdisc_module() {
     return 0
   fi
 
+  # 模块存在则写入开机加载（含 fq，Alpine 上多为模块）
   if modinfo "${module_name}" >/dev/null 2>&1 || lsmod 2>/dev/null | grep -q "^${module_name//-/_}"; then
     mkdir -p "$(dirname "${MODULES_CONF}")"
     echo "${module_name}" >"${MODULES_CONF}"
+    # OpenRC / Alpine: modules-load.d 需 openrc 或启动脚本支持；同时写入 /etc/modules
+    if [[ -f /etc/modules ]] && ! grep -qxF "${module_name}" /etc/modules 2>/dev/null; then
+      echo "${module_name}" >>/etc/modules
+    fi
     ok "开机将自动加载 ${module_name}"
   else
+    # 可能是内建
     rm -f "${MODULES_CONF}" 2>/dev/null || true
   fi
 }
@@ -224,10 +329,13 @@ sysctl_apply_file() {
 }
 
 # ---------- 启用 / 关闭 BBR ----------
+# enable_bbr_qdisc [algo] [qdisc|auto] [persist 0|1]
 enable_bbr_qdisc() {
   local algo="${1:-bbr}"
-  local qdisc="${2:-fq}"
+  local qdisc_req="${2:-auto}"
   local persist="${3:-1}"
+  local qdisc=""
+  local sysctl_err=""
 
   if [[ "${algo}" == "bbr" ]] && ! kernel_supports_bbr; then
     err "当前内核似乎不支持 BBR（通常需 Linux 4.9+）"
@@ -235,7 +343,6 @@ enable_bbr_qdisc() {
     return 1
   fi
 
-  load_qdisc_module "${qdisc}"
   modprobe tcp_bbr 2>/dev/null || true
 
   if [[ "${algo}" == "bbr" ]] && ! grep -qw bbr <<<"$(get_available_cc)"; then
@@ -243,25 +350,43 @@ enable_bbr_qdisc() {
     return 1
   fi
 
-  if ! sysctl -w "net.core.default_qdisc=${qdisc}" >/dev/null 2>&1; then
+  # 自动选择可用队列；Alpine 上 fq 常缺失，会回退 fq_codel
+  if [[ "${qdisc_req}" == "auto" || -z "${qdisc_req}" ]]; then
+    qdisc="$(resolve_qdisc auto)" || return 1
+  else
+    qdisc="$(resolve_qdisc "${qdisc_req}")" || return 1
+  fi
+
+  load_qdisc_module "${qdisc}" || true
+
+  if ! sysctl_err="$(sysctl -w "net.core.default_qdisc=${qdisc}" 2>&1)"; then
     err "无法设置 default_qdisc=${qdisc}"
+    [[ -n "${sysctl_err}" ]] && err "  sysctl: ${sysctl_err}"
     return 1
   fi
-  if ! sysctl -w "net.ipv4.tcp_congestion_control=${algo}" >/dev/null 2>&1; then
+  if ! sysctl_err="$(sysctl -w "net.ipv4.tcp_congestion_control=${algo}" 2>&1)"; then
     err "无法设置 tcp_congestion_control=${algo}"
+    [[ -n "${sysctl_err}" ]] && err "  sysctl: ${sysctl_err}"
+    return 1
+  fi
+
+  # 验证 default_qdisc 确实生效
+  local new_q
+  new_q="$(get_qdisc)"
+  if [[ "${new_q}" != "${qdisc}" ]]; then
+    err "设置后 default_qdisc 仍为 ${new_q}（期望 ${qdisc}）"
     return 1
   fi
 
   apply_qdisc_to_ifaces "${qdisc}" || true
 
-  local new_cc new_q
+  local new_cc
   new_cc="$(get_cc)"
-  new_q="$(get_qdisc)"
   if [[ "${new_cc}" != "${algo}" ]]; then
     err "启用失败：拥塞控制仍为 ${new_cc}"
     return 1
   fi
-  ok "已启用 ${algo} + ${qdisc}（当前 qdisc=${new_q}）"
+  ok "已启用 ${algo} + ${qdisc}"
 
   if [[ "${persist}" == "1" ]]; then
     mkdir -p "$(dirname "${SYSCTL_BBR}")"
@@ -285,8 +410,13 @@ disable_bbr() {
   if ! grep -qw cubic <<<"$(get_available_cc)"; then
     cc="$(awk '{print $1}' /proc/sys/net/ipv4/tcp_available_congestion_control 2>/dev/null || echo reno)"
   fi
+  # 回退到可用队列
+  if ! qdisc_is_usable "${qdisc}"; then
+    qdisc="$(resolve_qdisc auto 2>/dev/null || echo pfifo_fast)"
+  fi
 
   rm -f "${SYSCTL_BBR}" "${MODULES_CONF}" 2>/dev/null || true
+  # Alpine /etc/modules 中由本脚本追加的行可保留或忽略
   sysctl -w "net.ipv4.tcp_congestion_control=${cc}" >/dev/null 2>&1 || true
   sysctl -w "net.core.default_qdisc=${qdisc}" >/dev/null 2>&1 || true
   apply_qdisc_to_ifaces "${qdisc}" 2>/dev/null || true
@@ -396,7 +526,7 @@ apply_smart_tuning() {
   buffer_bytes=$((buffer_mb * 1024 * 1024))
 
   info "智能调优: 带宽=${upload_mbps}M  region=${region}  buffer=${buffer_mb}MB (cap=${cap_mb}MB)"
-  enable_bbr_qdisc bbr fq 1 || return 1
+  enable_bbr_qdisc bbr auto 1 || return 1
 
   write_and_apply_tune "$(cat <<EOF
 net.core.rmem_max = ${buffer_bytes}
@@ -417,7 +547,7 @@ apply_extreme_tuning() {
     return 0
   fi
 
-  enable_bbr_qdisc bbr fq 1 || return 1
+  enable_bbr_qdisc bbr auto 1 || return 1
 
   local buffer_bytes=1073741824
   local output_bytes=268435456
@@ -469,7 +599,7 @@ clear_all_1key_bbr() {
 
 # ---------- 一键 ----------
 onekey() {
-  title "一键启用 BBR + FQ + 亚太 TCP 调优"
+  title "一键启用 BBR + 可用队列 + 亚太 TCP 调优"
   print_distro_info
   ensure_tools
 
@@ -479,12 +609,13 @@ onekey() {
       warn "本机为 Debian/Ubuntu 系，可运行: bash bbr.sh byjoey"
       warn "或菜单选择安装 byJoey BBRv3 内核后再执行 onekey"
     else
-      warn "请升级系统内核后再试（Alpine: apk upgrade；RHEL: 新内核包）"
+      warn "请升级系统内核后再试（Alpine: apk add linux-virt 或对应内核 + modules）"
     fi
     return 1
   fi
 
-  enable_bbr_qdisc bbr fq 1 || return 1
+  # auto：优先 fq，Alpine 无 sch_fq 时自动 fq_codel
+  enable_bbr_qdisc bbr auto 1 || return 1
   apply_apac_tuning || true
   show_status
   ok "一键完成"
@@ -520,6 +651,7 @@ pick_and_enable_qdisc() {
     warn "已取消"
     return 0
   fi
+  # 指定队列失败时 resolve_qdisc 会自动回退并 warn
   enable_bbr_qdisc bbr "${qdisc}" 1
 }
 
@@ -530,21 +662,22 @@ menu() {
     menu_header "BBR / 网络加速（全系统）"
     print_distro_info
     show_status
-    echo "  1) ⚡ 一键启用（BBR + FQ + 亚太调优）  [推荐]"
-    echo "  2) 启用 BBR + FQ"
-    echo "  3) 启用 BBR + FQ_CODEL"
-    echo "  4) 启用 BBR + FQ_PIE"
-    echo "  5) 启用 BBR + CAKE"
-    echo "  6) 亚太 TCP 调优"
-    echo "  7) 智能带宽优化（按带宽选 buffer）"
-    echo "  8) 极限测速模式（慎用）"
-    echo "  9) 查看状态"
-    echo " 10) 关闭 BBR / 恢复默认拥塞控制"
-    echo " 11) 清空 TCP 调优配置"
-    echo " 12) 清空全部 1key BBR 配置"
+    echo "  1) ⚡ 一键启用（BBR + 自动队列 + 亚太调优）  [推荐]"
+    echo "  2) 启用 BBR + 自动队列（优先 FQ，不可用则 FQ_CODEL）"
+    echo "  3) 启用 BBR + FQ"
+    echo "  4) 启用 BBR + FQ_CODEL"
+    echo "  5) 启用 BBR + FQ_PIE"
+    echo "  6) 启用 BBR + CAKE"
+    echo "  7) 亚太 TCP 调优"
+    echo "  8) 智能带宽优化（按带宽选 buffer）"
+    echo "  9) 极限测速模式（慎用）"
+    echo " 10) 查看状态"
+    echo " 11) 关闭 BBR / 恢复默认拥塞控制"
+    echo " 12) 清空 TCP 调优配置"
+    echo " 13) 清空全部 1key BBR 配置"
     if can_install_byjoey_kernel; then
       echo ""
-      echo " 13) 安装 byJoey BBRv3 内核（仅 Debian/Ubuntu .deb）"
+      echo " 14) 安装 byJoey BBRv3 内核（仅 Debian/Ubuntu .deb）"
     else
       echo ""
       echo "  （当前系统不可装 byJoey .deb 内核，使用原生 BBR 即可）"
@@ -558,43 +691,44 @@ menu() {
         onekey || true
         pause
         ;;
-      2) pick_and_enable_qdisc fq "FQ"; pause ;;
-      3) pick_and_enable_qdisc fq_codel "FQ_CODEL"; pause ;;
-      4) pick_and_enable_qdisc fq_pie "FQ_PIE"; pause ;;
-      5) pick_and_enable_qdisc cake "CAKE"; pause ;;
-      6)
+      2) pick_and_enable_qdisc auto "自动队列"; pause ;;
+      3) pick_and_enable_qdisc fq "FQ"; pause ;;
+      4) pick_and_enable_qdisc fq_codel "FQ_CODEL"; pause ;;
+      5) pick_and_enable_qdisc fq_pie "FQ_PIE"; pause ;;
+      6) pick_and_enable_qdisc cake "CAKE"; pause ;;
+      7)
         if is_tty && ! confirm "应用亚太 TCP 调优?"; then warn "已取消"; pause; continue; fi
         apply_apac_tuning || true
         pause
         ;;
-      7)
+      8)
         apply_smart_tuning || true
         pause
         ;;
-      8)
+      9)
         apply_extreme_tuning || true
         pause
         ;;
-      9)
+      10)
         show_status
         pause
         ;;
-      10)
+      11)
         if is_tty && ! confirm "确认关闭 BBR?"; then warn "已取消"; pause; continue; fi
         disable_bbr || true
         pause
         ;;
-      11)
+      12)
         if is_tty && ! confirm "清空 TCP 调优?"; then warn "已取消"; pause; continue; fi
         clear_tuning || true
         pause
         ;;
-      12)
+      13)
         if is_tty && ! confirm "清空全部 1key BBR 配置?"; then warn "已取消"; pause; continue; fi
         clear_all_1key_bbr || true
         pause
         ;;
-      13)
+      14)
         install_byjoey_kernel || true
         pause
         ;;
@@ -613,8 +747,8 @@ usage() {
   cat <<EOF
 用法:
   bash bbr.sh                 # 交互菜单
-  bash bbr.sh onekey          # 一键: BBR+FQ + 亚太调优
-  bash bbr.sh enable [qdisc]  # 启用 BBR + 队列 (默认 fq)
+  bash bbr.sh onekey          # 一键: BBR + 自动队列 + 亚太调优
+  bash bbr.sh enable [qdisc]  # 启用 BBR + 队列 (默认 auto: 优先 fq)
   bash bbr.sh disable         # 关闭 BBR
   bash bbr.sh status          # 查看状态
   bash bbr.sh apac            # 亚太 TCP 调优
@@ -656,7 +790,7 @@ main() {
       onekey
       ;;
     enable|--enable)
-      enable_bbr_qdisc bbr "${2:-fq}" 1
+      enable_bbr_qdisc bbr "${2:-auto}" 1
       ;;
     disable|--disable)
       disable_bbr
